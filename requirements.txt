@@ -1,0 +1,15 @@
+# SolarSense AI — runtime dependencies
+# These are the top-level packages; pip resolves the rest (langchain-core, openai, httpx, etc).
+#
+# BEST PRACTICE: your local Windows env already works, so the most reliable file is the
+# one captured from it. On your machine run:
+#       pip freeze > requirements.txt
+# and use THAT on the server — it pins the exact versions you tested with.
+# The list below is a clean, working fallback if you'd rather not freeze.
+
+requests>=2.31
+python-dotenv>=1.0
+rich>=13.0
+langgraph>=0.2
+langchain-openai>=0.2
+python-telegram-bot>=20.7
