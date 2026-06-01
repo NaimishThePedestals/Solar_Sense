@@ -1,3 +1,4 @@
+
 # """
 # validator.py
 # ------------
@@ -32,6 +33,21 @@
 #         return False
 #     # Dawn / evening misting is fine — only flag if NOT explicitly timed to a safe window.
 #     return not _SAFE_TIME.search(text)
+
+
+# # Wrong / counterproductive advice the model sometimes pads with on thin days.
+# _TILT_FIXED = re.compile(r"\b(tilt|re-?angle|reposition|re-?orient|adjust the angle)\b.{0,40}"
+#                          r"\b(array|panel|module)s?\b.{0,40}\b(wind|convection|cool)", re.I)
+# _BAD_COATING = re.compile(r"\brain-?x\b|\b(hydrophobic|consumer)\b.{0,30}\b(coating|spray)\b", re.I)
+
+
+# def _is_low_quality_action(text: str) -> str | None:
+#     """Return a reason string if the action is wrong/counterproductive, else None."""
+#     if _TILT_FIXED.search(text):
+#         return "tilting a fixed array to 'catch wind' (fixed arrays don't move; loses more than it gains)"
+#     if _BAD_COATING.search(text):
+#         return "consumer hydrophobic coating as anti-soiling (can cement dust in arid air)"
+#     return None
 
 
 # # ── Text de-looping ───────────────────────────────────────────────────────────
@@ -244,9 +260,21 @@
 #                 issues.append(f"Removed unsafe action (water on hot panels) in {group}: '{action[:40]}...'")
 #                 continue
 
+#             # Strip wrong / counterproductive advice (tilting fixed arrays, Rain-X, etc).
+#             bad = _is_low_quality_action(action)
+#             if bad:
+#                 issues.append(f"Removed low-quality action in {group} — {bad}: '{action[:40]}...'")
+#                 continue
+
 #             it["action"] = action
 #             it["why_now"] = deloop_text(it.get("why_now", ""))
 #             it["payback_notes"] = deloop_text(it.get("payback_notes", ""))
+
+#             # Normalize confidence; marginal actions carry NO fabricated number.
+#             conf = str(it.get("confidence", "medium")).lower()
+#             if conf not in ("high", "medium", "marginal"):
+#                 conf = "medium"
+#             it["confidence"] = conf
 
 #             # Cap gain to the addressed factor's loss (can't recover more than exists).
 #             try:
@@ -257,11 +285,17 @@
 #             if group != "long_term" and cap is not None and gain > cap:
 #                 issues.append(f"Capped gain {gain}%→{cap}% (factor only loses {cap}%) in {group}.")
 #                 gain = float(cap)
-#             it["estimated_gain_percent"] = round(gain, 1)
 
-#             # Recompute kWh from REAL baseline so % and kWh always agree.
-#             annual_kwh = gain / 100.0 * baseline
-#             it[kwh_field] = round(annual_kwh / periods_per_year, 1)
+#             if conf == "marginal" or gain == 0:
+#                 # Honest: no invented percentage, no kWh — shown as "marginal".
+#                 it["confidence"] = "marginal"
+#                 it["estimated_gain_percent"] = 0
+#                 it[kwh_field] = None
+#             else:
+#                 it["estimated_gain_percent"] = round(gain, 1)
+#                 # Recompute kWh from REAL baseline so % and kWh always agree.
+#                 annual_kwh = gain / 100.0 * baseline
+#                 it[kwh_field] = round(annual_kwh / periods_per_year, 1)
 
 #             clean.append(it)
 
@@ -288,6 +322,8 @@
 #         for i in items:
 #             i["estimated_gain_percent"] = round(i.get("estimated_gain_percent", 0) * factor, 1)
 #         issues.append(f"Scaled {group} gains down to fit {cap}% recoverable cap.")
+
+
 
 
 
@@ -364,6 +400,22 @@ def _is_low_quality_action(text: str) -> str | None:
     if _BAD_COATING.search(text):
         return "consumer hydrophobic coating as anti-soiling (can cement dust in arid air)"
     return None
+
+
+# The reflex filler the model defaults to on heat-dominated sites: "clear debris/
+# clutter from under the panels for airflow." Detected as two independent signals so
+# word distance doesn't matter. Fine if it carries a real gain; useless as marginal
+# filler that appears at every location.
+_FILLER_CLEAR = re.compile(
+    r"\b(clear|remove|clean up|free up|clearing|removing)\b.{0,70}"
+    r"\b(debris|clutter|leaves|objects?|items?|materials?|build-?up|nests?|obstructions?)\b", re.I)
+_FILLER_AIRFLOW = re.compile(
+    r"\b(airflow|air ?gap|air ?flow|ventilation|convection|cooling|"
+    r"(under|underneath|beneath|behind|around)\b.{0,25}\b(panel|module|array))\b", re.I)
+
+
+def _is_airflow_filler(text: str) -> bool:
+    return bool(_FILLER_CLEAR.search(text) and _FILLER_AIRFLOW.search(text))
 
 
 # ── Text de-looping ───────────────────────────────────────────────────────────
@@ -604,6 +656,11 @@ def validate_recommendations(recs: dict[str, Any], analysis: dict[str, Any],
 
             if conf == "marginal" or gain == 0:
                 # Honest: no invented percentage, no kWh — shown as "marginal".
+                # Also drop the generic "clear debris under panels for airflow" filler
+                # from the action-today groups — it's the reflex that appears everywhere.
+                if group in ("do_now", "do_this_week") and _is_airflow_filler(action):
+                    issues.append(f"Dropped generic airflow filler in {group}: '{action[:40]}...'")
+                    continue
                 it["confidence"] = "marginal"
                 it["estimated_gain_percent"] = 0
                 it[kwh_field] = None
@@ -618,6 +675,9 @@ def validate_recommendations(recs: dict[str, Any], analysis: dict[str, Any],
         # Cap short-term cumulative gains at what's physically recoverable today.
         if group in ("do_now", "do_this_week"):
             _scale_group_to_cap(clean, recoverable_today, issues, group)
+
+        # Lead with the biggest real win; marginal (gain 0) actions sink to the bottom.
+        clean.sort(key=lambda it: it.get("estimated_gain_percent", 0) or 0, reverse=True)
 
         r[group] = clean
 

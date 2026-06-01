@@ -173,22 +173,36 @@
 # You are given the validated factors and the physics numbers. RANK actions by the size of
 # the factor they attack: the biggest controllable loss gets the top "do_now" action.
 
-# HARD RULES:
-# 1. Each action's estimated_gain_percent must be <= the loss of the factor it addresses.
-#    You cannot recover more than a factor is losing. (The system will cap this anyway.)
-# 2. NEVER recommend spraying/misting/hosing water onto the panel FACE during hot/peak
-#    hours — thermal shock cracks cells. Cooling actions must use airflow: raise mounts,
-#    add standoffs, improve back-ventilation, or shade — or be done only at dawn/after sunset.
-# 3. At most ONE cleaning action per group. Other actions must target heat/airflow, timing,
-#    or system losses — not more cleaning.
-# 4. addresses_factor must be unique within the whole output (no duplicate actions).
-# 5. At least one action references this site's geography; at least one cites a SPECIFIC
-#    time window from the forecast data (e.g. "before 8 AM", "ahead of Wednesday's rain").
-# 6. do_now items: doable in <3 hours, no contractor, no delivery.
-# 7. RAIN-AWARE: if rain probability > 50% in the next 48h, do not recommend wet cleaning now.
+# QUALITY OVER QUANTITY — this is the most important rule:
+# - Recommend ONLY actions that are genuinely worthwhile for THIS site today. Do NOT pad.
+# - If only one action is justified in a group, return just one. Empty groups are fine.
+# - Two solid actions beat three with filler. A thin day SHOULD produce a short plan.
 
-# Item counts: do_now 2-3, do_this_week 2-3, long_term 1-2. Be concise — no repetition.
-# kWh fields are recomputed by the system from the real baseline, so just estimate them.
+# EVIDENCE HONESTY:
+# - Attach a numeric estimated_gain_percent ONLY to actions with a well-established,
+#   quantifiable mechanism: washing soiled panels, raising mount height / adding standoffs
+#   for airflow, fixing actual shading shown in the data.
+# - For actions that are reasonable but marginal or hard to quantify (clearing minor debris,
+#   trimming nearby vegetation, backside dusting), set estimated_gain_percent = 0 and
+#   confidence = "marginal". DO NOT invent a specific percentage like "+0.5%".
+# - confidence is one of: "high", "medium", "marginal".
+
+# BANNED ACTIONS — never recommend these (they are wrong or counterproductive):
+# - Tilting, repositioning, or re-angling a FIXED rooftop array "to catch wind" — fixed
+#   arrays don't move, and changing tilt loses more than convection gains.
+# - Consumer hydrophobic coatings (e.g. Rain-X) as anti-soiling — they can cement dust in
+#   arid air. Only a proper PV anti-soiling coating by a technician, and only long-term.
+# - Spraying/misting/hosing water onto the panel FACE to cool it — thermal shock cracks cells.
+#   Cooling = airflow (raise mounts, standoffs, back-ventilation, remove real obstructions),
+#   or wet-CLEANING only at dawn / after sunset.
+
+# OTHER RULES:
+# - At most ONE cleaning action per group. addresses_factor unique across the whole output.
+# - At least one action references this site's geography; at least one cites a SPECIFIC time
+#   window from the forecast (e.g. "before 8 AM", "ahead of Wednesday's rain").
+# - do_now items: doable in <3 hours, no contractor, no delivery.
+# - RAIN-AWARE: if rain probability > 50% in the next 48h, do not recommend wet cleaning now.
+# - Be concise — no repetition. kWh fields are recomputed by the system; just estimate them.
 
 # Return ONLY valid JSON, no prose, no fences:
 # {
@@ -197,12 +211,12 @@
 #   "annual_baseline_kwh": <int>,
 #   "todays_recoverable_percent": <int>,
 #   "do_now": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
-#               "estimated_extra_kwh_today":<num>,"effort":"low|medium|high",
-#               "estimated_cost_inr":"<range or free>","why_now":"<cites a number>"}],
+#               "confidence":"high|medium|marginal","estimated_extra_kwh_today":<num>,
+#               "effort":"low|medium|high","estimated_cost_inr":"<range or free>","why_now":"<cites a number>"}],
 #   "do_this_week": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
-#               "estimated_extra_kwh_per_week":<num>,"effort":"...","estimated_cost_inr":"...","why_now":"..."}],
+#               "confidence":"...","estimated_extra_kwh_per_week":<num>,"effort":"...","estimated_cost_inr":"...","why_now":"..."}],
 #   "long_term": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
-#               "estimated_extra_kwh_per_year":<num>,"effort":"...","estimated_cost_inr":"...","payback_notes":"..."}]
+#               "confidence":"...","estimated_extra_kwh_per_year":<num>,"effort":"...","estimated_cost_inr":"...","payback_notes":"..."}]
 # }
 # """
 
@@ -265,14 +279,6 @@
 
 
 
-
-
-
-
-
-
-
-
 """
 agents.py
 ---------
@@ -296,7 +302,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from physics import compute_physics, physics_prompt_block
+from physics import compute_physics, physics_prompt_block, site_profile, site_profile_block
 from validator import validate_analysis, validate_recommendations
 from tools import (
     get_air_quality,
@@ -442,52 +448,69 @@ def analyst_agent(state: dict) -> dict:
 
 # ---------- Agent 4: Advisor ----------
 
-ADVISOR_SYSTEM = """You are a hands-on solar installer (500+ Indian rooftop jobs) turning a
-diagnosis into an action plan real people will follow.
+ADVISOR_SYSTEM = """You are a master solar technician who has serviced rooftops across deserts,
+coasts, cities, and mountains. You are writing an action plan for ONE specific site.
 
-You are given the validated factors and the physics numbers. RANK actions by the size of
-the factor they attack: the biggest controllable loss gets the top "do_now" action.
+HOW TO THINK (this is what makes two locations get DIFFERENT plans):
+Start from the SITE PROFILE. Your job is to diagnose what is UNUSUAL or DOMINANT about THIS
+site and prescribe for it — not to emit a standard checklist. A coastal site, a desert site,
+and a cool mountain site must produce visibly different plans because their profiles differ.
+The #1 "do_now" action must attack this site's single most distinctive or largest issue.
 
-QUALITY OVER QUANTITY — this is the most important rule:
-- Recommend ONLY actions that are genuinely worthwhile for THIS site today. Do NOT pad.
-- If only one action is justified in a group, return just one. Empty groups are fine.
-- Two solid actions beat three with filler. A thin day SHOULD produce a short plan.
+SELF-CHECK before you write each action: "Would I give this same advice at a totally different
+site?" If yes, it's probably generic filler — replace it with something this site's data
+actually calls for, or drop it. Cite the site's real numbers (PM10 value, tilt angle, wind
+direction, rain time) in why_now so the advice is unmistakably about THIS place.
+
+THE DO-NOW REALITY (read this — it's why your plans look identical):
+Heat has almost NO good same-day fix — you cannot cool the weather, and raising mounts is a
+this-week job, not a do-now one. So do NOT pad "do_now" with "clear debris/clutter under the
+panels for airflow" — that is a reflex filler that fits everywhere and helps almost nowhere.
+Only put it in do_now if you have a SPECIFIC reason it applies here, with a real gain.
+Legitimate do_now actions are essentially: CLEAN the glass (only if soiled), fresh-water RINSE
+(coastal salt), or remove a REAL visible shading/obstruction. If none of those apply, do_now
+should be SHORT or EMPTY — say plainly that there's little to recover today and the real wins
+are this-week (standoffs/ventilation) and long-term. An empty do_now is a correct answer.
+RANK by gain: the highest-percentage real action leads; never let a marginal action be #1.
+
+MATCH THE LEVER TO THE SITE (examples, not a checklist — choose what fits, ignore the rest):
+- Extreme/high dust (PM10): cleaning CADENCE is the lever (e.g. weekly/twice-weekly), not a
+  one-off wipe; a water-fed pole or scheduled routine beats a single clean.
+- Coastal/salt: fresh-water RINSE (not dry brushing) to clear salt film; mention it explicitly.
+- Hot + low wind + high heat loss: airflow — raise mounts / standoffs / clear rear obstructions.
+- Cool climate / low heat loss: do NOT prescribe cooling at all; focus elsewhere or keep it short.
+- Tilt far from PVGIS optimal AND mount is adjustable: nudge tilt toward the optimal angle (state it).
+- High altitude / high UV: periodic visual inspection for encapsulant yellowing; not a daily lever.
+- Humid: overnight dew cements dust — early-morning wipe timing matters.
+- Rain coming soon: let the rain pre-clean, then squeegee; don't waste a wash today.
 
 EVIDENCE HONESTY:
-- Attach a numeric estimated_gain_percent ONLY to actions with a well-established,
-  quantifiable mechanism: washing soiled panels, raising mount height / adding standoffs
-  for airflow, fixing actual shading shown in the data.
-- For actions that are reasonable but marginal or hard to quantify (clearing minor debris,
-  trimming nearby vegetation, backside dusting), set estimated_gain_percent = 0 and
-  confidence = "marginal". DO NOT invent a specific percentage like "+0.5%".
-- confidence is one of: "high", "medium", "marginal".
+- Numeric estimated_gain_percent ONLY for well-established, quantifiable mechanisms (cleaning
+  soiled glass, raising mounts for airflow, correcting a real tilt/shading problem).
+- Reasonable-but-marginal/unquantifiable actions: set estimated_gain_percent = 0 and
+  confidence = "marginal". Never invent a number like "+0.5%". confidence ∈ high|medium|marginal.
 
-BANNED ACTIONS — never recommend these (they are wrong or counterproductive):
-- Tilting, repositioning, or re-angling a FIXED rooftop array "to catch wind" — fixed
-  arrays don't move, and changing tilt loses more than convection gains.
-- Consumer hydrophobic coatings (e.g. Rain-X) as anti-soiling — they can cement dust in
-  arid air. Only a proper PV anti-soiling coating by a technician, and only long-term.
-- Spraying/misting/hosing water onto the panel FACE to cool it — thermal shock cracks cells.
-  Cooling = airflow (raise mounts, standoffs, back-ventilation, remove real obstructions),
-  or wet-CLEANING only at dawn / after sunset.
+BANNED (wrong/unsafe — never recommend):
+- Tilting/repositioning a FIXED array "to catch wind".
+- Consumer hydrophobic coatings (e.g. Rain-X) as anti-soiling.
+- Spraying/misting water on the panel FACE to cool it (thermal shock). Cooling = airflow only.
 
-OTHER RULES:
-- At most ONE cleaning action per group. addresses_factor unique across the whole output.
-- At least one action references this site's geography; at least one cites a SPECIFIC time
-  window from the forecast (e.g. "before 8 AM", "ahead of Wednesday's rain").
-- do_now items: doable in <3 hours, no contractor, no delivery.
-- RAIN-AWARE: if rain probability > 50% in the next 48h, do not recommend wet cleaning now.
-- Be concise — no repetition. kWh fields are recomputed by the system; just estimate them.
+CONSTRAINTS:
+- Rank by factor size; gain per action <= the loss of the factor it addresses.
+- At most ONE cleaning action per group; addresses_factor unique across the whole output.
+- do_now = doable in <3h, no contractor. If rain prob > 50% in next 48h, no wet cleaning now.
+- QUALITY OVER QUANTITY: a thin day should produce a short plan. Empty groups are fine. No padding.
+- Be concise, no repetition. kWh fields are recomputed by the system; just estimate them.
 
 Return ONLY valid JSON, no prose, no fences:
 {
-  "reasoning": "<2 sentences: biggest recoverable factor and why the top action attacks it>",
+  "reasoning": "<2 sentences: what is DISTINCTIVE about this site and how the top action targets it>",
   "system_assumption": "5 kWp rooftop",
   "annual_baseline_kwh": <int>,
   "todays_recoverable_percent": <int>,
   "do_now": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
               "confidence":"high|medium|marginal","estimated_extra_kwh_today":<num>,
-              "effort":"low|medium|high","estimated_cost_inr":"<range or free>","why_now":"<cites a number>"}],
+              "effort":"low|medium|high","estimated_cost_inr":"<range or free>","why_now":"<cites a site-specific number>"}],
   "do_this_week": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
               "confidence":"...","estimated_extra_kwh_per_week":<num>,"effort":"...","estimated_cost_inr":"...","why_now":"..."}],
   "long_term": [{"action":"...","addresses_factor":"...","estimated_gain_percent":<int>,
@@ -504,15 +527,17 @@ def advisor_agent(state: dict) -> dict:
     per_kwp = pvgis.get("annual_yield_kwh_per_kwp") or 0
     baseline = per_kwp * 5  # 5 kWp assumption
 
+    sp = site_profile(state["raw_data"], physics, state["lat"], state["lon"])
     user_msg = (
         f"Location: {state['raw_data'].get('location_name')}\n"
         f"PVGIS yield per kWp: {per_kwp} kWh/yr -> 5 kWp baseline ~{baseline:.0f} kWh/yr\n\n"
+        f"{site_profile_block(sp)}\n\n"
         f"{physics_prompt_block(physics)}\n\n"
         f"=== VALIDATED FACTORS ===\n{json.dumps(analysis.get('factors'), indent=2)}\n\n"
         f"Max recoverable today (engine): {physics['recoverable_today_pct']}%\n"
         f"Rain prob next 48h (max %): "
         f"{(state['raw_data'].get('weather') or {}).get('daily', {}).get('rain_probability_max_percent', [])[:2]}\n\n"
-        f"Produce the recommendations JSON."
+        f"Diagnose what is DISTINCTIVE about this site and produce the recommendations JSON."
     )
     raw_text = ""
     try:
