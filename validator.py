@@ -498,10 +498,10 @@ def _norm_action(text: str) -> str:
 
 # ── Analysis validation ───────────────────────────────────────────────────────
 
-def validate_analysis(analysis: dict[str, Any], physics: dict[str, Any]) -> tuple[dict, list[str]]:
+def validate_analysis(analysis: dict[str, Any]) -> tuple[dict, list[str]]:
     """
-    Clamp the LLM's factor numbers to the physics engine and recompute the
-    headline so the displayed score is always internally consistent.
+    De-loop text and ensure factor percentages are valid numbers.
+    Now that the physics engine is removed, we trust the LLM's estimated numbers.
     """
     issues: list[str] = []
     a = dict(analysis or {})
@@ -523,16 +523,17 @@ def validate_analysis(analysis: dict[str, Any], physics: dict[str, Any]) -> tupl
             f["todays_impact_percent"] = max(0, round(float(f.get("todays_impact_percent", 0))))
         except (TypeError, ValueError):
             f["todays_impact_percent"] = 0
-        if f["todays_impact_percent"] >= 3:   # keep the "no trivial factors" rule
+        if f["todays_impact_percent"] > 0:
             clean_factors.append(f)
 
-    # Headline numbers come from PHYSICS, not the LLM — single source of truth.
+    # Recompute headline numbers based on the LLM's factors
     a["factors"] = clean_factors
-    a["todays_efficiency_score"] = physics["efficiency_score"]
-    a["todays_estimated_loss_percent"] = round(physics["controllable_loss_pct"])
-    a["recoverable_today_pct"] = physics["recoverable_today_pct"]
-    a["irradiance_availability_pct"] = physics["irradiance_availability_pct"]
-    a["cloud_loss_pct"] = physics["cloud_loss_pct"]
+    total_impact = sum(f["todays_impact_percent"] for f in clean_factors)
+    a["todays_estimated_loss_percent"] = total_impact
+    a["todays_efficiency_score"] = 100 - total_impact
+    a["recoverable_today_pct"] = a.get("recoverable_today_pct", total_impact)
+    a["irradiance_availability_pct"] = a.get("irradiance_availability_pct", 100)
+    a["cloud_loss_pct"] = a.get("cloud_loss_pct", 0)
 
     # Re-derive severity from impact so labels never contradict numbers.
     for f in clean_factors:
@@ -540,35 +541,9 @@ def validate_analysis(analysis: dict[str, Any], physics: dict[str, Any]) -> tupl
         f["severity"] = "high" if imp > 12 else "medium" if imp >= 6 else "low"
 
     if not clean_factors:
-        issues.append("Analyst returned no usable factors; synthesized them from the physics engine.")
-        clean_factors = _factors_from_physics(physics)
-        a["factors"] = clean_factors
+        issues.append("Analyst returned no usable factors.")
 
     return a, issues
-
-
-def _factors_from_physics(physics: dict[str, Any]) -> list[dict]:
-    """Build minimal controllable factors directly from the physics engine."""
-    out = []
-    heat = physics.get("heat_loss_pct", 0)
-    soil = physics.get("soiling_loss_pct", 0)
-    if heat >= 3:
-        out.append({
-            "name": "High-temperature cell loss",
-            "severity": "high" if heat > 12 else "medium" if heat >= 6 else "low",
-            "current_value": f"cell {physics.get('cell_temp_c')}°C",
-            "todays_impact_percent": round(heat),
-            "explanation": "Cell temperature above 25°C STC reduces output at ~0.4%/°C.",
-        })
-    if soil >= 3:
-        out.append({
-            "name": "Dust soiling",
-            "severity": "high" if soil > 12 else "medium" if soil >= 6 else "low",
-            "current_value": f"PM10 {physics['inputs_used'].get('pm10_ug_m3')} µg/m³",
-            "todays_impact_percent": round(soil),
-            "explanation": "Airborne dust deposits on the glass and blocks light (low confidence).",
-        })
-    return out
 
 
 # ── Recommendation validation ──────────────────────────────────────────────────
@@ -597,7 +572,7 @@ def validate_recommendations(recs: dict[str, Any], analysis: dict[str, Any],
     factor_loss = {}
     for f in (analysis.get("factors") or []):
         factor_loss[_norm_action(f.get("name", ""))] = f.get("todays_impact_percent", 0)
-    # Cap at what is REALISTICALLY recoverable (physics), not total controllable loss.
+    # Cap at what is REALISTICALLY recoverable (from LLM), not total controllable loss.
     recoverable_today = float(analysis.get("recoverable_today_pct",
                                            analysis.get("todays_estimated_loss_percent", 0)))
 

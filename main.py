@@ -61,17 +61,59 @@
 #         console.print("[red]Invalid choice — try again.[/red]")
 
 
+# def _query_variants(text: str) -> list[str]:
+#     """Progressively broader queries so a too-specific address still resolves.
+#     'shivji Nagar veraval' -> ['shivji Nagar veraval', 'Nagar veraval', 'veraval']
+#     Generic (no country hard-coding): assumes the city tends to come last."""
+#     text = text.strip()
+#     seen: list[str] = []
+
+#     def add(q: str) -> None:
+#         q = q.strip(" ,")
+#         if q and q.lower() not in (s.lower() for s in seen):
+#             seen.append(q)
+
+#     add(text)
+#     if "," in text:  # drop leading comma-segments (most specific first)
+#         parts = [p.strip() for p in text.split(",") if p.strip()]
+#         for i in range(1, len(parts)):
+#             add(", ".join(parts[i:]))
+#     words = text.replace(",", " ").split()  # then drop leading words
+#     for i in range(1, len(words)):
+#         add(" ".join(words[i:]))
+#     return seen
+
+
 # def resolve_location(text: str) -> tuple[float, float]:
-#     """Accept either 'lat, lon' or a place name/address; return validated coordinates."""
+#     """Accept either 'lat, lon' or a place name/address; return validated coordinates.
+#     Falls back to broader queries when a hyperlocal address has no exact match."""
 #     coords = _parse_coords(text)
 #     if coords:
 #         return coords
+
 #     console.print(f"[dim]Looking up “{text}”…[/dim]")
-#     chosen = _choose_candidate(geocode_place(text))
-#     if not chosen:
-#         raise ValueError(f"Could not find a location for “{text}”. "
-#                          f"Try adding more detail (e.g. 'Limbdi, Gujarat, India') or enter coordinates.")
-#     return chosen["lat"], chosen["lon"]
+#     variants = _query_variants(text)
+#     for q in variants:
+#         try:
+#             candidates = geocode_place(q)
+#         except Exception as e:
+#             raise ValueError(
+#                 f"Location lookup service is unreachable ({e}). "
+#                 f"Check your internet connection, or enter coordinates instead "
+#                 f"(e.g. '20.9077 70.3673')."
+#             )
+#         if candidates:
+#             if q.lower() != text.lower():
+#                 console.print(f"[yellow]No exact match for “{text}” — showing the closest "
+#                               f"broader area “{q}”.[/yellow]")
+#             chosen = _choose_candidate(candidates)
+#             if chosen:
+#                 return chosen["lat"], chosen["lon"]
+
+#     raise ValueError(
+#         f"Could not find “{text}”. Try a broader place (e.g. just the city + state + "
+#         f"country like 'Veraval, Gujarat, India'), or enter coordinates (e.g. '20.9077 70.3673')."
+#     )
 
 
 # def get_coords() -> tuple[float, float]:
@@ -198,10 +240,16 @@
 #         t.add_column("Payback" if is_year else "Why now", style="dim")
 #         for i, r in enumerate(items, 1):
 #             eff = r.get("effort", "medium")
-#             kwh = r.get(kwh_field, 0) or 0
-#             kwh_str = f"{kwh:.0f}" if is_year else f"{kwh:.1f}"   # FIX: .1f so sub-1 kWh isn't shown as "0"
+#             marginal = r.get("confidence") == "marginal" or not r.get("estimated_gain_percent")
+#             kwh = r.get(kwh_field)
+#             if marginal:
+#                 gain_str, kwh_str = "marginal", "—"
+#             else:
+#                 kwh = kwh or 0
+#                 kwh_str = f"{kwh:.0f}" if is_year else f"{kwh:.1f}"
+#                 gain_str = f"+{r.get('estimated_gain_percent', 0)}%"
 #             ec = EFFORT_COLORS.get(eff, "white")
-#             t.add_row(str(i), r.get("action", ""), f"+{r.get('estimated_gain_percent', 0)}%",
+#             t.add_row(str(i), r.get("action", ""), gain_str,
 #                       kwh_str, f"[{ec}]{eff}[/{ec}]", str(r.get("estimated_cost_inr", "")), r.get(why_field, ""))
 #         console.print(t)
 
@@ -279,14 +327,35 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 """
 main.py
 -------
-Terminal entry point. Asks for lat/lon, runs the graph, prints a Rich report.
+Terminal entry point. Asks for a location, then asks the SAME 7 system questions
+the Telegram bot asks (numbered — type a number to pick, Enter to skip), then runs
+the pipeline and prints a Rich report.
 
 Usage:
     python main.py
-    python main.py 23.0258 72.5873   # Ahmedabad
+    python main.py 23.0258 72.5873          # Ahmedabad
+    python main.py "Jaisalmer, Rajasthan"
+    python main.py "Veraval" --debug         # also dump raw LLM output + repairs
+    python main.py "Veraval" --noprofile     # skip the questions (generic report, for A/B)
 """
 
 import sys
@@ -296,6 +365,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+import setup_flow                       # same 7-question bank the Telegram bot uses
 from graph import build_graph
 from tools import geocode_place
 
@@ -439,22 +509,7 @@ def render_report(final_state: dict) -> None:
         console.print(Panel("\n".join(f"• {e}" for e in errors),
                             title="[yellow]⚠  Data Source Warnings[/yellow]", border_style="yellow"))
 
-    # Efficiency score (controllable health) + environmental context line
-    score = analysis.get("todays_efficiency_score", physics.get("efficiency_score", 0))
-    loss = analysis.get("todays_estimated_loss_percent", physics.get("controllable_loss_pct", 0))
-    avail = physics.get("irradiance_availability_pct")
-    color = score_color(score)
-    bar = "█" * (score // 5) + "░" * (20 - score // 5)
-    env_line = ""
-    if avail is not None:
-        env_line = (f"\n[dim]Sky today: delivering {avail}% of clear-sky potential "
-                    f"(weather — not recoverable)[/dim]")
-    console.print(Panel(
-        f"[bold {color}]{score}/100[/bold {color}]   [{color}]{bar}[/{color}]"
-        f"     [dim](controllable losses ~{loss}% right now)[/dim]{env_line}\n\n"
-        f"{analysis.get('todays_summary', '')}",
-        title="[bold]🔴 Live Efficiency — Right Now[/bold]", border_style=color,
-    ))
+    # Removed Live Efficiency score display
 
     # PVGIS
     pvgis = raw.get("pvgis") or {}
@@ -521,14 +576,9 @@ def render_report(final_state: dict) -> None:
         t.add_column("Payback" if is_year else "Why now", style="dim")
         for i, r in enumerate(items, 1):
             eff = r.get("effort", "medium")
-            marginal = r.get("confidence") == "marginal" or not r.get("estimated_gain_percent")
-            kwh = r.get(kwh_field)
-            if marginal:
-                gain_str, kwh_str = "marginal", "—"
-            else:
-                kwh = kwh or 0
-                kwh_str = f"{kwh:.0f}" if is_year else f"{kwh:.1f}"
-                gain_str = f"+{r.get('estimated_gain_percent', 0)}%"
+            kwh = r.get(kwh_field) or 0
+            kwh_str = f"{kwh:.0f}" if is_year else f"{kwh:.1f}"
+            gain_str = f"+{r.get('estimated_gain_percent', 0)}%"
             ec = EFFORT_COLORS.get(eff, "white")
             t.add_row(str(i), r.get("action", ""), gain_str,
                       kwh_str, f"[{ec}]{eff}[/{ec}]", str(r.get("estimated_cost_inr", "")), r.get(why_field, ""))
@@ -574,12 +624,84 @@ def render_debug(final_state: dict) -> None:
     console.rule("[dim magenta]end debug[/dim magenta]", style="magenta")
 
 
+def ask_profile_cli() -> dict:
+    """Ask the SAME 7 questions as the Telegram bot, but in the terminal: print
+    numbered options, type a number to pick (Enter = Not sure / skip). Reads the
+    shared setup_flow.STEPS so the two flows can never drift apart."""
+    console.print("\n[bold cyan]📋 A few quick questions so the advice fits YOUR system[/bold cyan]")
+    console.print("[dim]Type the number of your answer and press Enter. Press Enter alone to skip a "
+                  "question. Type 'q' to skip the rest.[/dim]\n")
+    profile: dict = {}
+    idx = 0
+    while idx < len(setup_flow.STEPS):
+        step = setup_flow.STEPS[idx]
+
+        # Conditional follow-ups (e.g. shading detail only if shaded).
+        if step.get("skip_if", lambda p: False)(profile):
+            idx += 1
+            continue
+
+        # Typed-only question (free text, e.g. what casts the shade).
+        if step.get("typed_only"):
+            console.print(f"[bold]{step['text']}[/bold]")
+            ans = console.input("[bold]> [/bold]").strip()
+            if ans.lower() == "q":
+                break
+            if ans and ans.lower() not in ("skip", "/skip"):
+                profile[step["key"]] = ans
+            idx = setup_flow.next_index(profile, idx)
+            console.print()
+            continue
+
+        # Button question -> numbered menu.
+        console.print(f"[bold]{step['text']}[/bold]")
+        opts = step.get("options", [])
+        for n, (label, _value) in enumerate(opts, 1):
+            console.print(f"  [cyan]{n}[/cyan]. {label}")
+        raw = console.input("[bold]> [/bold]").strip().lower()
+
+        if raw == "q":
+            break
+        if raw == "" :                       # Enter alone = skip (Not sure)
+            idx = setup_flow.next_index(profile, idx); console.print(); continue
+        if not (raw.isdigit() and 1 <= int(raw) <= len(opts)):
+            console.print("[red]Please type one of the numbers above (or Enter to skip).[/red]\n")
+            continue                          # re-ask the same question
+
+        label, value = opts[int(raw) - 1]
+        if value == "__type__":               # "Other (type it)" -> ask for a number
+            typed = console.input(f"[bold]{step.get('type_prompt', 'Type a value:')} [/bold]").strip()
+            num = setup_flow.parse_number(typed)
+            if num is None:
+                console.print("[red]Not a valid number — skipping this one.[/red]")
+            else:
+                profile[step["key"]] = num
+        elif value == "__same__":              # inverter = system size
+            if profile.get("system_kwp"):
+                profile["inverter_kw"] = profile["system_kwp"]
+        elif value != "__skip__":
+            profile[step["key"]] = float(value) if step.get("numeric") else value
+
+        idx = setup_flow.next_index(profile, idx)
+        console.print()
+
+    console.print(f"[green]✓ Using profile:[/green] [dim]{profile or '(all skipped — generic 5 kWp)'}[/dim]\n")
+    return profile
+
+
 def main():
     debug = "--debug" in sys.argv
     if debug:
         sys.argv = [a for a in sys.argv if a != "--debug"]
+    no_profile = "--noprofile" in sys.argv
+    if no_profile:
+        sys.argv = [a for a in sys.argv if a != "--noprofile"]
+
     lat, lon = get_coords()
-    final_state = build_graph().invoke({"lat": lat, "lon": lon})
+    # The real flow: location first, then the questions, then the tailored report.
+    # (--noprofile skips the questions, for an A/B comparison against the generic report.)
+    profile = {} if no_profile else ask_profile_cli()
+    final_state = build_graph().invoke({"lat": lat, "lon": lon, "profile": profile})
     render_report(final_state)
     if debug:
         render_debug(final_state)

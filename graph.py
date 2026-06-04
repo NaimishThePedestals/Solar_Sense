@@ -121,15 +121,6 @@
 
 
 
-
-
-
-
-
-
-
-
-
 """
 graph.py
 --------
@@ -145,7 +136,7 @@ from typing import Any, TypedDict
 from langgraph.graph import END, StateGraph
 from rich.console import Console
 
-from agents import advisor_agent, analyst_agent, data_collector_agent, physics_agent
+from agents import advisor_agent, analyst_agent, data_collector_agent
 
 console = Console()
 
@@ -153,9 +144,9 @@ console = Console()
 class SolarState(TypedDict, total=False):
     lat: float
     lon: float
+    profile: dict[str, Any]
     raw_data: dict[str, Any]
     errors: list[str]
-    physics: dict[str, Any]
     analysis: dict[str, Any]
     analysis_issues: list[str]
     analysis_raw: str
@@ -190,18 +181,7 @@ def collect_with_logging(state: SolarState) -> SolarState:
     return new
 
 
-def physics_with_logging(state: SolarState) -> SolarState:
-    t0 = _log_start("2", 4, "PHYSICS ENGINE", "📐", "Computing cell temp & losses in code (Faiman + clear-sky)")
-    new = physics_agent(state)
-    p = new["physics"]
-    console.print(f"  [green]✓ Cell temp:[/green] {p['cell_temp_c']}°C  "
-                  f"[green]Heat:[/green] {p['heat_loss_pct']}%  [green]Soiling:[/green] {p['soiling_loss_pct']}%")
-    console.print(f"  [green]✓ Controllable loss:[/green] {p['controllable_loss_pct']}%  "
-                  f"[dim](score {p['efficiency_score']}/100)[/dim]")
-    console.print(f"  [green]✓ Clear-sky availability:[/green] {p['irradiance_availability_pct']}% "
-                  f"[dim](environmental, not recoverable)[/dim]")
-    _log_end(t0, f"score {p['efficiency_score']}/100, recoverable ~{p['recoverable_today_pct']}%")
-    return new
+
 
 
 def analyze_with_logging(state: SolarState) -> SolarState:
@@ -234,12 +214,10 @@ def advise_with_logging(state: SolarState) -> SolarState:
 def build_graph():
     wf = StateGraph(SolarState)
     wf.add_node("collect", collect_with_logging)
-    wf.add_node("physics", physics_with_logging)
     wf.add_node("analyze", analyze_with_logging)
     wf.add_node("advise", advise_with_logging)
     wf.set_entry_point("collect")
-    wf.add_edge("collect", "physics")
-    wf.add_edge("physics", "analyze")
+    wf.add_edge("collect", "analyze")
     wf.add_edge("analyze", "advise")
     wf.add_edge("advise", END)
     return wf.compile()

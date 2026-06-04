@@ -116,16 +116,7 @@ def format_for_telegram(final_state: dict) -> list[str]:
             c1.append(f"  • {_esc(e)}")
         c1.append("")
 
-    bar_filled = "█" * (score // 10)
-    bar_empty  = "░" * (10 - score // 10)
-    c1 += [
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{_score_emoji(score)} {_bold(f'Today Efficiency: {score}/100')}",
-        f"{_code(bar_filled + bar_empty)} {_esc(f'(-{loss}% loss)')}",
-        "",
-        _esc(summary),
-        "",
-    ]
+    # Removed Live Efficiency score display
 
     if weather or aq:
         c1.append(f"🌤 {_bold('Current Conditions')}")
@@ -255,14 +246,7 @@ def format_for_whatsapp(final_state: dict) -> str:
             lines.append(f"  • {e}")
         lines.append("")
 
-    bar_filled = "█" * (score // 10)
-    bar_empty  = "░" * (10 - score // 10)
-    lines += [
-        "━━━━━━━━━━━━━━━━━━━━━━━",
-        f"{_score_emoji(score)} *Today's Efficiency: {score}/100*",
-        f"`{bar_filled}{bar_empty}` (-{loss}% loss)",
-        "", summary, "",
-    ]
+    # Removed Live Efficiency score display
 
     if weather or aq:
         lines.append("🌤 *Current Conditions*")

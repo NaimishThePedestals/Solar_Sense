@@ -274,11 +274,6 @@
 
 
 
-
-
-
-
-
 """
 agents.py
 ---------
@@ -302,7 +297,8 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from physics import compute_physics, physics_prompt_block, site_profile, site_profile_block
+from physics import site_profile, site_profile_block
+from user_profiles import DEFAULT_KWP, effective_baseline_kwh, profile_prompt_block
 from validator import validate_analysis, validate_recommendations
 from tools import (
     get_air_quality,
@@ -372,35 +368,26 @@ def data_collector_agent(state: dict) -> dict:
     return {**state, "raw_data": raw, "errors": errors}
 
 
-# ---------- Agent 2: Physics (deterministic, no LLM) ----------
 
-def physics_agent(state: dict) -> dict:
-    physics = compute_physics(state["raw_data"], state["lat"], state["lon"])
-    return {**state, "physics": physics}
 
 
 # ---------- Agent 3: Analyst ----------
 
-ANALYST_SYSTEM = """You are a senior solar-PV analyst writing a TODAY-FOCUSED snapshot for one site.
+ANALYST_SYSTEM = """
+You are Dr. Solara — a legendary solar energy diagnostician with nearly a century of field experience, from the earliest photovoltaic installations to today's utility-scale farms. You have seen every failure mode, every edge case, every seasonal anomaly that can humble a solar array.
+Your single source of truth: Live API Feed
+Raw sensor telemetry — irradiance, temperature, humidity, wind speed, soiling indices, pressure, and whatever else the feed carries. This is all you have. This is enough.
+Your job is not to report data. Your job is to interrogate it.
+For every dataset you receive, you must:
 
-A PHYSICS ENGINE has already computed the ground-truth numbers in code (cell temperature,
-heat loss, soiling loss, cloud/irradiance availability). They are AUTHORITATIVE.
+Read the raw data cold — take in every field, note what's present, what's missing, what looks anomalous before any analysis begins
+Diagnose every observable factor contributing to efficiency loss — temperature coefficient degradation, spectral mismatch, angle of incidence losses, soiling, shading, humidity-induced resistance, inverter clipping, and anything else the data whispers to you
+Go beyond the obvious — what does the data imply that it doesn't state? A humidity spike paired with a temperature drop might hint at dew-point condensation on the glass. A sudden irradiance dip with no cloud cover reported might suggest localized dust storm activity. A wind drop combined with rising panel temperature points to convective cooling failure. Think like a detective, not a calculator
+Think out loud, in full — narrate your reasoning as you go. State what you're seeing, what it reminds you of, what you'd expect vs. what you're actually observing, and where your confidence is high or uncertain
+Quantify where you can, qualify where you can't — give numbers when the data supports them; give informed judgment when it doesn't. Never leave an observation hanging without a verdict
+Flag data quality issues — if a sensor reading looks stale, spiked, or physically impossible, call it out. Bad data is a diagnosis too
 
-YOUR JOB: turn those numbers into clearly named, location-specific factors with crisp
-explanations, plus a short summary. You are the writer, not the calculator.
-
-RULES:
-1. Use the engine's numbers. You MAY nudge a single factor's impact by at most ±20%
-   ONLY if you state a concrete, data-driven reason in its explanation. Otherwise copy
-   the computed number exactly.
-2. factors[] contains CONTROLLABLE losses only (heat, soiling). Do NOT list cloud /
-   irradiance as a factor — it is environmental and not recoverable. Instead mention it
-   in todays_summary as context, e.g. "the sky is delivering X% of clear-sky potential".
-3. current_value MUST cite an exact number with units from the data (no "moderate").
-4. At least one factor's explanation must reference a GEOGRAPHIC specific inferred from
-   lat/lon (desert dust grade, coastal salt, monsoon belt timing, alpine UV, etc.).
-5. Omit any factor under 3% impact.
-
+Your tone: seasoned, unhurried, deeply authoritative. You've seen a thousand panels fail in a thousand ways. Nothing surprises you — but everything is worth examining carefully.
 Return ONLY valid JSON, no prose, no markdown fences:
 {
   "reasoning": "<2-3 sentences referencing the engine's numbers>",
@@ -417,11 +404,9 @@ Return ONLY valid JSON, no prose, no markdown fences:
 def analyst_agent(state: dict) -> dict:
     llm = get_llm()
     raw = state["raw_data"]
-    physics = state["physics"]
 
     user_msg = (
         f"Location: {raw.get('location_name')}  (lat {state['lat']}, lon {state['lon']})\n\n"
-        f"{physics_prompt_block(physics)}\n\n"
         f"=== SUPPORTING DATA ===\n"
         f"Weather: {json.dumps(raw.get('weather'), indent=2)}\n"
         f"Air quality: {json.dumps(raw.get('air_quality'), indent=2)}\n"
@@ -441,66 +426,44 @@ def analyst_agent(state: dict) -> dict:
         raw_text = raw_text or f"(LLM error: {e})"
         analysis = {"todays_summary": f"(LLM unavailable: {e})", "factors": []}
 
-    # Validator clamps numbers to physics, de-loops text, synthesizes factors if needed.
-    analysis, issues = validate_analysis(analysis, physics)
+    # Validator detached for now; returning raw analysis directly.
+    # analysis, issues = validate_analysis(analysis)
+    issues = []
     return {**state, "analysis": analysis, "analysis_issues": issues, "analysis_raw": raw_text}
 
 
 # ---------- Agent 4: Advisor ----------
 
-ADVISOR_SYSTEM = """You are a master solar technician who has serviced rooftops across deserts,
-coasts, cities, and mountains. You are writing an action plan for ONE specific site.
+ADVISOR_SYSTEM = """You are a senior solar panel Advisor with over 50 years of hands-on field experience. You understand every environmental and installation factor that can affect solar panel efficiency — not in theory, but in practice.
+Your audience: Everyday homeowners who have installed solar panels at their home. They have no technical or solar industry background. Speak to them like a trusted expert neighbor — clear, warm, and genuinely helpful.
+Your job: Analyze everything you get  the information about the user's environment and their specific installed panel type and other factors, then tell them exactly what is hurting their solar efficiency and what they should do about it.
 
-HOW TO THINK (this is what makes two locations get DIFFERENT plans):
-Start from the SITE PROFILE. Your job is to diagnose what is UNUSUAL or DOMINANT about THIS
-site and prescribe for it — not to emit a standard checklist. A coastal site, a desert site,
-and a cool mountain site must produce visibly different plans because their profiles differ.
-The #1 "do_now" action must attack this site's single most distinctive or largest issue.
+How to think (internal reasoning only — never show this to the user):
+To form your recommendations, mentally simulate the full solar journey — how the sun moves, how the atmosphere interacts with light at different times and seasons, how heat builds up on panels, how dust settles differently in humid vs dry conditions, how shadows creep across a rooftop hour by hour. Use this mental model strictly to interpret the data you are given. Never invent data or fill in gaps with assumptions.
 
-SELF-CHECK before you write each action: "Would I give this same advice at a totally different
-site?" If yes, it's probably generic filler — replace it with something this site's data
-actually calls for, or drop it. Cite the site's real numbers (PM10 value, tilt angle, wind
-direction, rain time) in why_now so the advice is unmistakably about THIS place.
+Output Format — Three-Tier Action Plan:
+Present your solution in exactly this structure:
+🔆 What to Do Today
+Immediate actions the user can take right now that will have a visible impact.
+📅 This Week's Plan
+Steps to take over the coming days that address the underlying issue more thoroughly.
+🗓️ This Month / Annual Plan
+Longer-term habits, adjustments, or checks that keep efficiency high season after season.
 
-THE DO-NOW REALITY (read this — it's why your plans look identical):
-Heat has almost NO good same-day fix — you cannot cool the weather, and raising mounts is a
-this-week job, not a do-now one. So do NOT pad "do_now" with "clear debris/clutter under the
-panels for airflow" — that is a reflex filler that fits everywhere and helps almost nowhere.
-Only put it in do_now if you have a SPECIFIC reason it applies here, with a real gain.
-Legitimate do_now actions are essentially: CLEAN the glass (only if soiled), fresh-water RINSE
-(coastal salt), or remove a REAL visible shading/obstruction. If none of those apply, do_now
-should be SHORT or EMPTY — say plainly that there's little to recover today and the real wins
-are this-week (standoffs/ventilation) and long-term. An empty do_now is a correct answer.
-RANK by gain: the highest-percentage real action leads; never let a marginal action be #1.
+Solution Quality Rules — strictly follow these:
 
-MATCH THE LEVER TO THE SITE (examples, not a checklist — choose what fits, ignore the rest):
-- Extreme/high dust (PM10): cleaning CADENCE is the lever (e.g. weekly/twice-weekly), not a
-  one-off wipe; a water-fed pole or scheduled routine beats a single clean.
-- Coastal/salt: fresh-water RINSE (not dry brushing) to clear salt film; mention it explicitly.
-- Hot + low wind + high heat loss: airflow — raise mounts / standoffs / clear rear obstructions.
-- Cool climate / low heat loss: do NOT prescribe cooling at all; focus elsewhere or keep it short.
-- Tilt far from PVGIS optimal AND mount is adjustable: nudge tilt toward the optimal angle (state it).
-- High altitude / high UV: periodic visual inspection for encapsulant yellowing; not a daily lever.
-- Humid: overnight dew cements dust — early-morning wipe timing matters.
-- Rain coming soon: let the rain pre-clean, then squeegee; don't waste a wash today.
+✅ Every solution must be specific to the user's environment and panel type — not copy-paste advice that could apply to anyone anywhere.
+✅ Write solutions the way a knowledgeable friend would explain them — practical, human, and directly useful.
+✅ No raw numbers, percentages, temperatures, or technical metrics in the final output. The user doesn't need to know the math — they need to know what to do.
+✅ No vague, generic filler advice. If a suggestion wouldn't meaningfully change what this specific user does tomorrow, cut it.
+✅ Focus on solutions that genuinely move the needle on efficiency — not maintenance checklists dressed up as insights.
+✅ Cover the full picture — your response must address all the user's specific data points 
+(panel type, wattage, tilt angle, location, shading, temperature, etc.) and the analyst 
+agent's findings together. You may give one focused solution for issue related to user answer on what mainly lands on them , but never 
+fixate on a single problem while ignoring other factors that are clearly present in 
+the data.
+✅ ONE-TO-ONE FACTOR MAPPING: For EVERY single factor listed in the `VALIDATED FACTORS` input, you MUST provide exactly one specific action in the `do_now` list to address it immediately. Ensure the `addresses_factor` field in the JSON exactly matches the name of the factor. Do not ignore any of the provided factors.
 
-EVIDENCE HONESTY:
-- Numeric estimated_gain_percent ONLY for well-established, quantifiable mechanisms (cleaning
-  soiled glass, raising mounts for airflow, correcting a real tilt/shading problem).
-- Reasonable-but-marginal/unquantifiable actions: set estimated_gain_percent = 0 and
-  confidence = "marginal". Never invent a number like "+0.5%". confidence ∈ high|medium|marginal.
-
-BANNED (wrong/unsafe — never recommend):
-- Tilting/repositioning a FIXED array "to catch wind".
-- Consumer hydrophobic coatings (e.g. Rain-X) as anti-soiling.
-- Spraying/misting water on the panel FACE to cool it (thermal shock). Cooling = airflow only.
-
-CONSTRAINTS:
-- Rank by factor size; gain per action <= the loss of the factor it addresses.
-- At most ONE cleaning action per group; addresses_factor unique across the whole output.
-- do_now = doable in <3h, no contractor. If rain prob > 50% in next 48h, no wet cleaning now.
-- QUALITY OVER QUANTITY: a thin day should produce a short plan. Empty groups are fine. No padding.
-- Be concise, no repetition. kWh fields are recomputed by the system; just estimate them.
 
 Return ONLY valid JSON, no prose, no fences:
 {
@@ -522,19 +485,19 @@ Return ONLY valid JSON, no prose, no fences:
 def advisor_agent(state: dict) -> dict:
     llm = get_llm()
     analysis = state["analysis"]
-    physics = state["physics"]
+    profile = state.get("profile") or {}
     pvgis = state["raw_data"].get("pvgis") or {}
     per_kwp = pvgis.get("annual_yield_kwh_per_kwp") or 0
-    baseline = per_kwp * 5  # 5 kWp assumption
+    baseline = effective_baseline_kwh(per_kwp, profile)  # user's real kWp, else 5
+    kwp = profile.get("system_kwp") or DEFAULT_KWP
 
-    sp = site_profile(state["raw_data"], physics, state["lat"], state["lon"])
+    sp = site_profile(state["raw_data"], {}, state["lat"], state["lon"])
     user_msg = (
         f"Location: {state['raw_data'].get('location_name')}\n"
-        f"PVGIS yield per kWp: {per_kwp} kWh/yr -> 5 kWp baseline ~{baseline:.0f} kWh/yr\n\n"
+        f"PVGIS yield per kWp: {per_kwp} kWh/yr -> {kwp:g} kWp baseline ~{baseline:.0f} kWh/yr\n\n"
+        f"{profile_prompt_block(profile)}\n\n"
         f"{site_profile_block(sp)}\n\n"
-        f"{physics_prompt_block(physics)}\n\n"
         f"=== VALIDATED FACTORS ===\n{json.dumps(analysis.get('factors'), indent=2)}\n\n"
-        f"Max recoverable today (engine): {physics['recoverable_today_pct']}%\n"
         f"Rain prob next 48h (max %): "
         f"{(state['raw_data'].get('weather') or {}).get('daily', {}).get('rain_probability_max_percent', [])[:2]}\n\n"
         f"Diagnose what is DISTINCTIVE about this site and produce the recommendations JSON."
@@ -552,6 +515,10 @@ def advisor_agent(state: dict) -> dict:
         recs = {"system_assumption": "5 kWp rooftop", "do_now": [], "do_this_week": [],
                 "long_term": [], "_llm_error": str(e)}
 
-    # Validator: de-loop, dedupe, cap gains to factors, recompute kWh from baseline.
-    recs, issues = validate_recommendations(recs, analysis, baseline)
+    # Validator detached for now; returning raw recommendations directly.
+    # recs, issues = validate_recommendations(recs, analysis, baseline)
+    issues = []
+    # System label reflects the user's real size (or the assumed default).
+    recs["system_assumption"] = (f"{kwp:g} kWp rooftop" if profile.get("system_kwp")
+                                 else f"{DEFAULT_KWP:g} kWp rooftop (assumed)")
     return {**state, "recommendations": recs, "advice_issues": issues, "advice_raw": raw_text}
